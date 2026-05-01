@@ -20,39 +20,71 @@
 
     console.log("✅ 页面滚动完成，开始提取对话内容...");
 
-    // 开始提取
-    let blocks = document.querySelectorAll('div.relative');
+    // Use data-message-author-role attribute for reliable role detection across browsers
+    let messageEls = document.querySelectorAll('[data-message-author-role]');
     let textContent = "";
+    let msgIdx = 0;
 
-    blocks.forEach((block, idx) => {
-        let role = "Unknown";
+    messageEls.forEach((msgEl) => {
+        const role = msgEl.getAttribute('data-message-author-role');
+        let displayRole = role === 'user' ? 'User' : role === 'assistant' ? 'ChatGPT' : role;
         let content = "";
 
-        if (block.querySelector('.text-token-text-primary') || block.querySelector('div.items-end')) {
-            role = "User";
-            let userContent = block.querySelector('.text-token-text-primary') || block.querySelector('div.items-end');
+        if (role === 'user') {
+            // User message: get the text content from the message container
+            let userContent = msgEl.querySelector('.whitespace-pre-wrap')
+                || msgEl.querySelector('[data-message-id]')
+                || msgEl;
             if (userContent) {
                 content = userContent.innerText.trim();
             }
-        } else if (block.querySelector('.markdown') || block.querySelector('.prose')) {
-            role = "ChatGPT";
-            let assistantContent = block.querySelector('.markdown, .prose');
+        } else if (role === 'assistant') {
+            // Assistant message: look for markdown/prose rendered content
+            let assistantContent = msgEl.querySelector('.markdown')
+                || msgEl.querySelector('.prose')
+                || msgEl;
             if (assistantContent) {
                 content = assistantContent.innerText.trim();
             }
         }
 
         if (content) {
-            const timestamp = new Date().toLocaleString();
-            textContent += `# ${role} Message ${idx + 1}\n`;
+            msgIdx++;
+
+            // Extract the original conversation timestamp from <time datetime="..."> elements
+            // Walk up to the nearest turn/article container to find the associated time element
+            let container = msgEl.closest('article')
+                || msgEl.closest('[data-testid^="conversation-turn"]')
+                || msgEl.parentElement;
+            let timeEl = container ? container.querySelector('time[datetime]') : null;
+
+            // If not found in the immediate container, try broader search in parent
+            if (!timeEl && container && container.parentElement) {
+                timeEl = container.parentElement.querySelector('time[datetime]');
+            }
+
+            let timestamp;
+            if (timeEl && timeEl.getAttribute('datetime')) {
+                timestamp = new Date(timeEl.getAttribute('datetime')).toLocaleString();
+            } else {
+                timestamp = "(timestamp not available)";
+            }
+
+            textContent += `# ${displayRole} Message ${msgIdx}\n`;
             textContent += `[Time]: ${timestamp}\n`;
-            textContent += `[${role}]:\n${content}\n\n====================\n\n`;
+            textContent += `[${displayRole}]:\n${content}\n\n====================\n\n`;
         }
     });
 
     // 尝试读取对话标题
     let titleElement = document.querySelector('nav a.bg-token-surface-secondary, nav a.bg-gray-200');
     let title = titleElement ? titleElement.innerText.trim() : '';
+
+    if (!title) {
+        // Also try the page <title> or the heading
+        let h1 = document.querySelector('h1');
+        if (h1) title = h1.innerText.trim();
+    }
 
     if (!title) {
         title = prompt('⚠️ 没找到对话标题，请手动输入文件名:', 'ChatGPT_Conversation');
@@ -72,5 +104,5 @@
     a.click();
     URL.revokeObjectURL(url);
 
-    console.log("🎉 对话提取完成并下载成功！");
+    console.log(`🎉 对话提取完成并下载成功！共提取 ${msgIdx} 条消息。`);
 })();

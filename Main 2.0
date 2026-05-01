@@ -5,9 +5,9 @@
     let lastHeight = 0;
     let sameCount = 0;
 
-    while (sameCount < 5) { // 如果5次检测到页面高度不变，判定滚动完成
+    while (sameCount < 5) {
         window.scrollTo(0, document.body.scrollHeight);
-        await new Promise(resolve => setTimeout(resolve, 1000)); // 每次滚动后等1秒
+        await new Promise(resolve => setTimeout(resolve, 1000));
 
         let newHeight = document.body.scrollHeight;
         if (newHeight === lastHeight) {
@@ -20,70 +20,183 @@
 
     console.log("✅ 页面滚动完成，开始提取对话内容...");
 
-    // Use data-message-author-role attribute for reliable role detection across browsers
-    let messageEls = document.querySelectorAll('[data-message-author-role]');
+    // --- Step 1: Try to fetch real timestamps from ChatGPT's internal API ---
+    let apiTimestamps = {}; // messageId -> timestamp string
+    let conversationTitle = '';
+    try {
+        const pathParts = window.location.pathname.split('/');
+        const conversationId = pathParts[pathParts.length - 1];
+        if (conversationId && conversationId.length > 10) {
+            const resp = await fetch(`/backend-api/conversation/${conversationId}`, {
+                credentials: 'include'
+            });
+            if (resp.ok) {
+                const data = await resp.json();
+                conversationTitle = data.title || '';
+                // Build a map of message_id -> create_time
+                if (data.mapping) {
+                    for (const nodeId in data.mapping) {
+                        const node = data.mapping[nodeId];
+                        if (node.message && node.message.create_time) {
+                            apiTimestamps[nodeId] = new Date(node.message.create_time * 1000).toLocaleString();
+                        }
+                    }
+                }
+                console.log(`✅ 从API获取到 ${Object.keys(apiTimestamps).length} 条消息的时间戳`);
+            }
+        }
+    } catch (e) {
+        console.log("⚠️ 无法从API获取时间戳，将标记为不可用", e);
+    }
+
+    // --- Step 2: Extract messages from DOM ---
+    // Use [class*='text-message'] selector (confirmed working with current ChatGPT UI)
+    // Fallback to [data-message-author-role] or article-based selectors
+    let elements = document.querySelectorAll("[class*='text-message']");
+
     let textContent = "";
     let msgIdx = 0;
 
-    messageEls.forEach((msgEl) => {
-        const role = msgEl.getAttribute('data-message-author-role');
-        let displayRole = role === 'user' ? 'User' : role === 'assistant' ? 'ChatGPT' : role;
-        let content = "";
+    if (elements.length > 0) {
+        // Primary approach: text-message class selector
+        for (let i = 0; i < elements.length; i++) {
+            const ele = elements[i];
+            const firstChild = ele.firstChild;
+            if (!firstChild) continue;
 
-        if (role === 'user') {
-            // User message: get the text content from the message container
-            let userContent = msgEl.querySelector('.whitespace-pre-wrap')
-                || msgEl.querySelector('[data-message-id]')
-                || msgEl;
-            if (userContent) {
-                content = userContent.innerText.trim();
-            }
-        } else if (role === 'assistant') {
-            // Assistant message: look for markdown/prose rendered content
-            let assistantContent = msgEl.querySelector('.markdown')
-                || msgEl.querySelector('.prose')
-                || msgEl;
-            if (assistantContent) {
-                content = assistantContent.innerText.trim();
-            }
-        }
+            let role = "User";
+            let content = "";
 
-        if (content) {
+            if (firstChild.nodeType === Node.ELEMENT_NODE) {
+                if (firstChild.className && firstChild.className.includes("markdown")) {
+                    role = "ChatGPT";
+                }
+                content = firstChild.innerText ? firstChild.innerText.trim() : '';
+            } else if (firstChild.nodeType === Node.TEXT_NODE) {
+                role = "User";
+                content = firstChild.textContent.trim();
+            }
+
+            if (!content) continue;
             msgIdx++;
 
-            // Extract the original conversation timestamp from <time datetime="..."> elements
-            // Walk up to the nearest turn/article container to find the associated time element
-            let container = msgEl.closest('article')
-                || msgEl.closest('[data-testid^="conversation-turn"]')
-                || msgEl.parentElement;
-            let timeEl = container ? container.querySelector('time[datetime]') : null;
-
-            // If not found in the immediate container, try broader search in parent
-            if (!timeEl && container && container.parentElement) {
-                timeEl = container.parentElement.querySelector('time[datetime]');
+            // Try to find the message ID from a parent element for timestamp lookup
+            let timestamp = "(timestamp not available)";
+            const msgIdEl = ele.closest('[data-message-id]');
+            if (msgIdEl) {
+                const msgId = msgIdEl.getAttribute('data-message-id');
+                if (apiTimestamps[msgId]) {
+                    timestamp = apiTimestamps[msgId];
+                }
+            }
+            // Fallback: try to find timestamp from any parent with data-testid
+            if (timestamp === "(timestamp not available)") {
+                const turnEl = ele.closest('article') || ele.closest('[data-testid^="conversation-turn"]');
+                if (turnEl) {
+                    const timeEl = turnEl.querySelector('time[datetime]');
+                    if (timeEl && timeEl.getAttribute('datetime')) {
+                        timestamp = new Date(timeEl.getAttribute('datetime')).toLocaleString();
+                    }
+                }
             }
 
-            let timestamp;
-            if (timeEl && timeEl.getAttribute('datetime')) {
-                timestamp = new Date(timeEl.getAttribute('datetime')).toLocaleString();
-            } else {
-                timestamp = "(timestamp not available)";
-            }
-
-            textContent += `# ${displayRole} Message ${msgIdx}\n`;
+            textContent += `# ${role} Message ${msgIdx}\n`;
             textContent += `[Time]: ${timestamp}\n`;
-            textContent += `[${displayRole}]:\n${content}\n\n====================\n\n`;
+            textContent += `[${role}]:\n${content}\n\n====================\n\n`;
         }
-    });
+    } else {
+        // Fallback approach: try article/turn-based selectors
+        console.log("⚠️ text-message selector未匹配，尝试备用选择器...");
+        const articles = document.querySelectorAll('article[data-testid^="conversation-turn"]');
 
-    // 尝试读取对话标题
-    let titleElement = document.querySelector('nav a.bg-token-surface-secondary, nav a.bg-gray-200');
-    let title = titleElement ? titleElement.innerText.trim() : '';
+        if (articles.length > 0) {
+            articles.forEach((article) => {
+                let role = "User";
+                let content = "";
+
+                const markdownEl = article.querySelector('.markdown, .prose');
+                if (markdownEl) {
+                    role = "ChatGPT";
+                    content = markdownEl.innerText.trim();
+                } else {
+                    // User message: look for the text content
+                    const userEl = article.querySelector('[data-message-author-role="user"]')
+                        || article.querySelector('.whitespace-pre-wrap');
+                    if (userEl) {
+                        content = userEl.innerText.trim();
+                    } else {
+                        // Last resort: get all text from article excluding buttons/nav
+                        const clone = article.cloneNode(true);
+                        clone.querySelectorAll('button, nav, svg').forEach(el => el.remove());
+                        content = clone.innerText.trim();
+                    }
+                }
+
+                if (!content) return;
+                msgIdx++;
+
+                let timestamp = "(timestamp not available)";
+                // Try API timestamps via data-message-id
+                const msgIdEl = article.querySelector('[data-message-id]');
+                if (msgIdEl) {
+                    const msgId = msgIdEl.getAttribute('data-message-id');
+                    if (apiTimestamps[msgId]) {
+                        timestamp = apiTimestamps[msgId];
+                    }
+                }
+                if (timestamp === "(timestamp not available)") {
+                    const timeEl = article.querySelector('time[datetime]');
+                    if (timeEl && timeEl.getAttribute('datetime')) {
+                        timestamp = new Date(timeEl.getAttribute('datetime')).toLocaleString();
+                    }
+                }
+
+                textContent += `# ${role} Message ${msgIdx}\n`;
+                textContent += `[Time]: ${timestamp}\n`;
+                textContent += `[${role}]:\n${content}\n\n====================\n\n`;
+            });
+        } else {
+            // Final fallback: try data-message-author-role
+            const roleEls = document.querySelectorAll('[data-message-author-role]');
+            roleEls.forEach((el) => {
+                const role = el.getAttribute('data-message-author-role');
+                const displayRole = role === 'user' ? 'User' : role === 'assistant' ? 'ChatGPT' : role;
+                const content = el.innerText.trim();
+                if (!content) return;
+                msgIdx++;
+
+                let timestamp = "(timestamp not available)";
+                const msgIdEl = el.closest('[data-message-id]') || el.querySelector('[data-message-id]');
+                if (msgIdEl) {
+                    const msgId = msgIdEl.getAttribute('data-message-id');
+                    if (apiTimestamps[msgId]) {
+                        timestamp = apiTimestamps[msgId];
+                    }
+                }
+
+                textContent += `# ${displayRole} Message ${msgIdx}\n`;
+                textContent += `[Time]: ${timestamp}\n`;
+                textContent += `[${displayRole}]:\n${content}\n\n====================\n\n`;
+            });
+        }
+    }
+
+    if (msgIdx === 0) {
+        console.log("❌ 未能提取到任何消息。ChatGPT页面结构可能已更新。");
+        alert("❌ 未能提取到任何消息。请确认你在ChatGPT对话页面上运行此脚本。");
+        return;
+    }
+
+    // --- Step 3: Get conversation title ---
+    let title = conversationTitle;
 
     if (!title) {
-        // Also try the page <title> or the heading
-        let h1 = document.querySelector('h1');
-        if (h1) title = h1.innerText.trim();
+        const titleEl = document.querySelector('title');
+        if (titleEl) {
+            title = titleEl.innerText.trim();
+            // Remove "ChatGPT" suffix if present
+            title = title.replace(/\s*[-–—|]\s*ChatGPT\s*$/i, '').trim();
+        }
     }
 
     if (!title) {

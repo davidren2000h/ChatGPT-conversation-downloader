@@ -1,108 +1,58 @@
 (async () => {
-    console.log("⏳ 正在从ChatGPT API获取对话数据...");
+    console.log("⏳ 正在自动滚动页面加载所有内容，请稍候...");
 
-    // Extract conversation ID from URL
-    const pathParts = window.location.pathname.split('/');
-    const conversationId = pathParts[pathParts.length - 1];
+    // 自动滚动到底部，确保加载完整
+    let lastHeight = 0;
+    let sameCount = 0;
 
-    if (!conversationId || conversationId.length < 10) {
-        alert("❌ 无法获取对话ID。请确认你在ChatGPT对话页面上运行此脚本（URL应包含 /c/ 或 /chat/ 后跟对话ID）。");
-        return;
-    }
+    while (sameCount < 5) { // 如果5次检测到页面高度不变，判定滚动完成
+        window.scrollTo(0, document.body.scrollHeight);
+        await new Promise(resolve => setTimeout(resolve, 1000)); // 每次滚动后等1秒
 
-    // Fetch full conversation data from ChatGPT's backend API
-    let data;
-    try {
-        const resp = await fetch(`/backend-api/conversation/${conversationId}`, {
-            credentials: 'include',
-            headers: {
-                'Content-Type': 'application/json'
-            }
-        });
-        if (!resp.ok) {
-            throw new Error(`API returned ${resp.status}: ${resp.statusText}`);
-        }
-        data = await resp.json();
-    } catch (e) {
-        console.error("❌ API请求失败:", e);
-        alert("❌ 无法从ChatGPT API获取对话数据。请确认你已登录并在对话页面上。\n\n错误: " + e.message);
-        return;
-    }
-
-    console.log("✅ API数据获取成功，正在解析...");
-
-    // Build ordered message list from the mapping tree
-    // The mapping is a tree structure; we need to walk it in order
-    const mapping = data.mapping;
-    const messages = [];
-
-    // Find the root node (parent is null or missing)
-    let rootId = null;
-    for (const id in mapping) {
-        if (!mapping[id].parent) {
-            rootId = id;
-            break;
+        let newHeight = document.body.scrollHeight;
+        if (newHeight === lastHeight) {
+            sameCount++;
+        } else {
+            sameCount = 0;
+            lastHeight = newHeight;
         }
     }
 
-    // Walk the tree depth-first following children order
-    function walkTree(nodeId) {
-        const node = mapping[nodeId];
-        if (!node) return;
+    console.log("✅ 页面滚动完成，开始提取对话内容...");
 
-        if (node.message && node.message.content && node.message.content.parts) {
-            const role = node.message.author ? node.message.author.role : 'unknown';
-            // Only include user and assistant messages
-            if (role === 'user' || role === 'assistant') {
-                const textParts = node.message.content.parts.filter(p => typeof p === 'string');
-                const content = textParts.join('\n').trim();
-                if (content) {
-                    messages.push({
-                        role: role,
-                        content: content,
-                        timestamp: node.message.create_time
-                            ? new Date(node.message.create_time * 1000).toLocaleString()
-                            : "(timestamp not available)"
-                    });
-                }
-            }
-        }
-
-        // Follow children in order
-        if (node.children && node.children.length > 0) {
-            for (const childId of node.children) {
-                walkTree(childId);
-            }
-        }
-    }
-
-    if (rootId) {
-        walkTree(rootId);
-    }
-
-    if (messages.length === 0) {
-        alert("❌ 未找到任何用户/助手消息。");
-        return;
-    }
-
-    // Build output text
+    // 开始提取
+    let blocks = document.querySelectorAll('div.relative');
     let textContent = "";
-    messages.forEach((msg, idx) => {
-        const displayRole = msg.role === 'user' ? 'User' : 'ChatGPT';
-        textContent += `# ${displayRole} Message ${idx + 1}\n`;
-        textContent += `[Time]: ${msg.timestamp}\n`;
-        textContent += `[${displayRole}]:\n${msg.content}\n\n====================\n\n`;
+
+    blocks.forEach((block, idx) => {
+        let role = "Unknown";
+        let content = "";
+
+        if (block.querySelector('.text-token-text-primary') || block.querySelector('div.items-end')) {
+            role = "User";
+            let userContent = block.querySelector('.text-token-text-primary') || block.querySelector('div.items-end');
+            if (userContent) {
+                content = userContent.innerText.trim();
+            }
+        } else if (block.querySelector('.markdown') || block.querySelector('.prose')) {
+            role = "ChatGPT";
+            let assistantContent = block.querySelector('.markdown, .prose');
+            if (assistantContent) {
+                content = assistantContent.innerText.trim();
+            }
+        }
+
+        if (content) {
+            const timestamp = new Date().toLocaleString();
+            textContent += `# ${role} Message ${idx + 1}\n`;
+            textContent += `[Time]: ${timestamp}\n`;
+            textContent += `[${role}]:\n${content}\n\n====================\n\n`;
+        }
     });
 
-    // Get title from API response
-    let title = data.title || '';
-
-    if (!title) {
-        const titleEl = document.querySelector('title');
-        if (titleEl) {
-            title = titleEl.innerText.trim().replace(/\s*[-–—|]\s*ChatGPT\s*$/i, '').trim();
-        }
-    }
+    // 尝试读取对话标题
+    let titleElement = document.querySelector('nav a.bg-token-surface-secondary, nav a.bg-gray-200');
+    let title = titleElement ? titleElement.innerText.trim() : '';
 
     if (!title) {
         title = prompt('⚠️ 没找到对话标题，请手动输入文件名:', 'ChatGPT_Conversation');
@@ -113,7 +63,7 @@
 
     title = title.replace(/[\\\/:*?"<>|]/g, '');
 
-    // Download file
+    // 下载文件
     const blob = new Blob([textContent], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -122,5 +72,5 @@
     a.click();
     URL.revokeObjectURL(url);
 
-    console.log(`🎉 对话提取完成并下载成功！共提取 ${messages.length} 条消息。`);
+    console.log("🎉 对话提取完成并下载成功！");
 })();
